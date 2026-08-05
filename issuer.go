@@ -13,7 +13,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 
@@ -48,9 +47,10 @@ type Issuer struct {
 	// certificate. Empty uses the system trust store.
 	TrustedCAFile string `json:"trusted_ca_file,omitempty"`
 
-	// ClientCertificateFile and ClientKeyFile authenticate this client with TLS.
-	// EST requires them for /simplereenroll, where the client proves possession of
-	// the certificate it is replacing.
+	// ClientCertificateFile and ClientKeyFile authenticate this client with TLS on
+	// requests that have no certificate of their own to present, which is every request
+	// but a renewal. A renewal presents the certificate it is replacing, taken from
+	// CertMagic's store.
 	ClientCertificateFile string `json:"client_certificate_file,omitempty"`
 	ClientKeyFile         string `json:"client_key_file,omitempty"`
 
@@ -60,7 +60,7 @@ type Issuer struct {
 
 	logger  *zap.Logger
 	client  *estclient.Client
-	history *enrollmentHistory
+	storage certmagic.Storage
 	caChain *caChainCache
 
 	// fetchCACerts is the seam tests substitute for a live /cacerts call.
@@ -69,8 +69,8 @@ type Issuer struct {
 
 // caChainCache holds the /cacerts response for the lifetime of the process. It is filled
 // lazily rather than in Provision so that an EST server which is briefly unreachable
-// delays a certificate instead of preventing Caddy from starting. Held by pointer for the
-// same reason as enrollmentHistory.
+// delays a certificate instead of preventing Caddy from starting. Held by pointer because
+// Caddy calls CaddyModule on a zero value of Issuer, which must stay copyable.
 type caChainCache struct {
 	mu           sync.Mutex
 	certificates []*x509.Certificate
@@ -91,31 +91,6 @@ func (c *caChainCache) get(ctx context.Context, fetch func(context.Context) ([]*
 	return certificates, nil
 }
 
-// enrollmentHistory records which name sets this process has already enrolled, so a
-// later request for the same names can be sent to /simplereenroll. It is held by pointer
-// because Caddy calls CaddyModule on a zero value of Issuer, which must stay copyable.
-type enrollmentHistory struct {
-	mu   sync.RWMutex
-	seen map[string]struct{}
-}
-
-func newEnrollmentHistory() *enrollmentHistory {
-	return &enrollmentHistory{seen: make(map[string]struct{})}
-}
-
-func (h *enrollmentHistory) contains(key string) bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	_, seen := h.seen[key]
-	return seen
-}
-
-func (h *enrollmentHistory) add(key string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.seen[key] = struct{}{}
-}
-
 // CaddyModule returns the Caddy module information.
 func (Issuer) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
@@ -127,7 +102,6 @@ func (Issuer) CaddyModule() caddy.ModuleInfo {
 // Provision resolves configuration placeholders and builds the EST client.
 func (iss *Issuer) Provision(ctx caddy.Context) error {
 	iss.logger = ctx.Logger(iss)
-	iss.history = newEnrollmentHistory()
 	iss.caChain = new(caChainCache)
 
 	replacer := caddy.NewReplacer()
@@ -220,32 +194,22 @@ func (iss *Issuer) IssuerKey() string {
 // re-enrolment.
 //
 // CertMagic has no separate renewal entry point: it calls Issue for both the first
-// issuance and every renewal. EST, however, distinguishes /simpleenroll from
-// /simplereenroll, and a CA may apply different authorisation rules to each. This issuer
-// therefore tracks which SAN sets it has already enrolled and re-enrols those, which
-// requires a client certificate to authenticate the call.
-//
-// The tracking is per process, so the first issuance after a restart goes to
-// /simpleenroll even for a name Caddy already holds a certificate for. Servers that
-// reject a re-enrolment of a known name will still accept that; servers that reject a
-// fresh enrolment of an already-issued name will not. Reading the current certificate
-// out of CertMagic storage would remove the caveat.
+// issuance and every renewal. EST does distinguish /simpleenroll from /simplereenroll,
+// and a CA may apply different authorisation rules to each, so the certificate CertMagic
+// currently holds decides which one this is.
 func (iss *Issuer) Issue(ctx context.Context, csr *x509.CertificateRequest) (*certmagic.IssuedCertificate, error) {
 	if csr == nil {
 		return nil, fmt.Errorf("est: issuing requires a certificate request")
 	}
 
-	call, operation := iss.client.Enroll, operationEnroll
-	if iss.shouldReenroll(csr) {
-		call, operation = iss.client.Reenroll, operationReenroll
+	operation, identity := iss.chooseOperation(ctx, csr)
+	call := iss.client.Enroll
+	if operation == operationReenroll {
+		call = func(ctx context.Context, csrDER []byte) ([]*x509.Certificate, error) {
+			return iss.client.Reenroll(ctx, csrDER, identity)
+		}
 	}
-
-	issued, err := iss.enroll(ctx, csr, call, operation)
-	if err != nil {
-		return nil, err
-	}
-	iss.markEnrolled(csr)
-	return issued, nil
+	return iss.enroll(ctx, csr, call, operation)
 }
 
 const (
@@ -253,28 +217,25 @@ const (
 	operationReenroll = "reenroll"
 )
 
-// shouldReenroll reports whether this process already enrolled the CSR's name set and can
-// authenticate a re-enrolment with a client certificate.
-func (iss *Issuer) shouldReenroll(csr *x509.CertificateRequest) bool {
-	if iss.ClientCertificateFile == "" {
-		return false
+// chooseOperation reports which EST operation the request needs and, for a renewal, the
+// certificate that authenticates it: the one being replaced, which is what RFC 7030
+// section 4.2.2 expects a client to present.
+//
+// A storage failure enrols instead of failing. Enrolling a name the CA considers already
+// issued may be refused, but leaving Caddy with no certificate at all is the worse of the
+// two outcomes.
+func (iss *Issuer) chooseOperation(ctx context.Context, csr *x509.CertificateRequest) (string, *tls.Certificate) {
+	current, err := iss.findCurrentCertificate(ctx, csr)
+	if err != nil {
+		iss.logger.Warn("could not read the current certificate, so enrolling as if the name were new",
+			zap.String("server", iss.Server),
+			zap.Error(err))
+		return operationEnroll, nil
 	}
-	return iss.history.contains(subjectKey(csr))
-}
-
-func (iss *Issuer) markEnrolled(csr *x509.CertificateRequest) {
-	iss.history.add(subjectKey(csr))
-}
-
-// subjectKey identifies the name set a CSR covers, so a renewal of the same names is
-// recognised regardless of SAN ordering.
-func subjectKey(csr *x509.CertificateRequest) string {
-	names := append([]string(nil), csr.DNSNames...)
-	for _, ip := range csr.IPAddresses {
-		names = append(names, ip.String())
+	if current == nil {
+		return operationEnroll, nil
 	}
-	sort.Strings(names)
-	return csr.Subject.CommonName + "|" + strings.Join(names, ",")
+	return operationReenroll, current
 }
 
 type enrollFunc func(context.Context, []byte) ([]*x509.Certificate, error)
@@ -398,6 +359,18 @@ func (iss *Issuer) stringTarget(directive string) (*string, bool) {
 	}
 }
 
+// configSetter restates caddytls.ConfigSetter, which Caddy calls to hand an issuer the
+// CertMagic configuration it is driven with.
+//
+// Declared here rather than imported: importing caddytls for one interface would pull
+// Caddy's whole TLS dependency graph into this module's go.mod, and Go satisfies
+// interfaces structurally, so the import buys nothing but weight. If Caddy ever changes
+// the signature, this guard keeps compiling and SetConfig silently stops being called -
+// which the integration tests catch, since a renewal then finds no storage.
+type configSetter interface {
+	SetConfig(cfg *certmagic.Config)
+}
+
 // Interface guards.
 var (
 	_ caddy.Module          = (*Issuer)(nil)
@@ -405,4 +378,5 @@ var (
 	_ caddy.Validator       = (*Issuer)(nil)
 	_ certmagic.Issuer      = (*Issuer)(nil)
 	_ caddyfile.Unmarshaler = (*Issuer)(nil)
+	_ configSetter          = (*Issuer)(nil)
 )

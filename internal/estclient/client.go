@@ -91,6 +91,7 @@ type Client struct {
 	label      string
 	username   string
 	password   string
+	tlsConfig  *tls.Config
 	httpClient *http.Client
 }
 
@@ -114,44 +115,63 @@ func New(cfg Config) (*Client, error) {
 		InsecureSkipVerify: cfg.InsecureSkipVerify,
 	}
 	if cfg.ClientCertificate != nil {
-		// GetClientCertificate rather than Certificates: Go filters Certificates against
-		// the certificate_authorities hint the server sends and silently presents nothing
-		// when nothing matches. An EST server's TLS chain need not share an issuer with
-		// the certificate being renewed, so that filter turns a valid re-enrolment into an
-		// unauthenticated request. The configured certificate is the only candidate here,
-		// so there is nothing to select between.
-		certificate := *cfg.ClientCertificate
-		tlsConfig.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-			return &certificate, nil
-		}
+		presentAlways(tlsConfig, cfg.ClientCertificate)
 	}
 
 	return &Client{
-		baseURL:  parsed,
-		label:    strings.Trim(cfg.Label, "/"),
-		username: cfg.Username,
-		password: cfg.Password,
+		baseURL:   parsed,
+		label:     strings.Trim(cfg.Label, "/"),
+		username:  cfg.Username,
+		password:  cfg.Password,
+		tlsConfig: tlsConfig,
 		httpClient: &http.Client{
 			Transport: &http.Transport{TLSClientConfig: tlsConfig},
 		},
 	}, nil
 }
 
+// presentAlways makes the handshake offer certificate unconditionally.
+//
+// GetClientCertificate rather than Certificates: Go filters Certificates against the
+// certificate_authorities hint the server sends and silently presents nothing when nothing
+// matches. An EST server's TLS chain need not share an issuer with the certificate being
+// renewed, so that filter turns a valid re-enrolment into an unauthenticated request.
+// There is only ever one candidate here, so there is nothing to select between.
+func presentAlways(tlsConfig *tls.Config, certificate *tls.Certificate) {
+	offered := *certificate
+	tlsConfig.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		return &offered, nil
+	}
+}
+
 // CACerts retrieves the CA certificate chain the server issues from. RFC 7030 requires a
 // client to fetch and trust this before relying on an enrolled certificate.
 func (c *Client) CACerts(ctx context.Context) ([]*x509.Certificate, error) {
-	return c.roundTrip(ctx, http.MethodGet, operationCACerts, nil)
+	return c.roundTrip(ctx, c.httpClient, http.MethodGet, operationCACerts, nil)
 }
 
 // Enroll requests a new certificate for the given DER-encoded PKCS#10 request.
 func (c *Client) Enroll(ctx context.Context, csrDER []byte) ([]*x509.Certificate, error) {
-	return c.roundTrip(ctx, http.MethodPost, operationSimpleEnroll, csrDER)
+	return c.roundTrip(ctx, c.httpClient, http.MethodPost, operationSimpleEnroll, csrDER)
 }
 
-// Reenroll renews an existing certificate. The server authenticates the caller by the
-// client certificate configured on this Client, so Config.ClientCertificate must be set.
-func (c *Client) Reenroll(ctx context.Context, csrDER []byte) ([]*x509.Certificate, error) {
-	return c.roundTrip(ctx, http.MethodPost, operationSimpleReenroll, csrDER)
+// Reenroll renews an existing certificate, authenticated by identity: the certificate being
+// replaced, which RFC 7030 section 4.2.2 expects the client to present. A nil identity
+// falls back to Config.ClientCertificate, and re-enrolling with neither will be refused by
+// any server that follows the specification.
+func (c *Client) Reenroll(ctx context.Context, csrDER []byte, identity *tls.Certificate) ([]*x509.Certificate, error) {
+	if identity == nil {
+		return c.roundTrip(ctx, c.httpClient, http.MethodPost, operationSimpleReenroll, csrDER)
+	}
+
+	// A connection in the shared pool carries the certificate it was handshaked with, so
+	// borrowing one would authenticate this renewal as whoever opened it. Renewals happen
+	// once per certificate lifetime, which makes a dedicated connection cheap.
+	transport := &http.Transport{TLSClientConfig: c.tlsConfig.Clone()}
+	presentAlways(transport.TLSClientConfig, identity)
+	defer transport.CloseIdleConnections()
+
+	return c.roundTrip(ctx, &http.Client{Transport: transport}, http.MethodPost, operationSimpleReenroll, csrDER)
 }
 
 func (c *Client) endpoint(operation string) string {
@@ -166,13 +186,13 @@ func (c *Client) endpoint(operation string) string {
 	return resolved.String()
 }
 
-func (c *Client) roundTrip(ctx context.Context, method, operation string, csrDER []byte) ([]*x509.Certificate, error) {
+func (c *Client) roundTrip(ctx context.Context, httpClient *http.Client, method, operation string, csrDER []byte) ([]*x509.Certificate, error) {
 	request, err := c.buildRequest(ctx, method, operation, csrDER)
 	if err != nil {
 		return nil, err
 	}
 
-	response, err := c.httpClient.Do(request)
+	response, err := httpClient.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("est: %s request failed: %w", operation, err)
 	}

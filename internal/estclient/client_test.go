@@ -66,6 +66,28 @@ func encodeCertsOnlyResponse(t *testing.T, certificates ...*x509.Certificate) []
 	return encoded
 }
 
+// newClientIdentity builds a self-signed key pair for use as a TLS client certificate,
+// which is what a re-enrolment authenticates with.
+func newClientIdentity(t *testing.T, commonName string) *tls.Certificate {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating client key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: commonName},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("creating client certificate: %v", err)
+	}
+	return &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
 // newTestClient starts a TLS test server with the given handler and returns a Client that
 // trusts it, so tests exercise the real TLS path rather than skipping verification.
 func newTestClient(t *testing.T, cfg Config, handler http.Handler) *Client {
@@ -329,27 +351,109 @@ func insertLineBreaks(s string, width int) string {
 func TestReenrollPresentsClientCertificateDespiteCAHints(t *testing.T) {
 	// Given: a server that demands a client certificate while advertising a CA list that
 	// does not include the issuer of the one the client holds.
-	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	identity := newClientIdentity(t, "renewing.example.com")
+	server := newClientAuthServer(t, newSelfSignedCertificate(t, "renewing.example.com"))
+
+	client, err := New(Config{
+		Server:            server.url,
+		RootCAs:           server.trust,
+		ClientCertificate: identity,
+	})
 	if err != nil {
-		t.Fatalf("generating client key: %v", err)
+		t.Fatalf("constructing client: %v", err)
 	}
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "renewing.example.com"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-	}
-	clientDER, err := x509.CreateCertificate(rand.Reader, template, template, &clientKey.PublicKey, clientKey)
+
+	// When: re-enrolling with no per-call identity, so the configured one is used.
+	certificates, err := client.Reenroll(context.Background(), []byte{0x30, 0x00}, nil)
+
+	// Then: the certificate was presented and the renewal succeeded.
 	if err != nil {
-		t.Fatalf("creating client certificate: %v", err)
+		t.Fatalf("Reenroll returned error: %v", err)
 	}
+	if server.presented != "renewing.example.com" {
+		t.Errorf("server saw client certificate %q, want renewing.example.com", server.presented)
+	}
+	if len(certificates) != 1 {
+		t.Errorf("expected one certificate, got %d", len(certificates))
+	}
+}
+
+// TestReenrollPrefersTheSuppliedIdentity covers the renewal path that matters in practice:
+// the certificate being replaced is the one CertMagic holds, which is not known when the
+// Client is built, so it has to be chosen per call.
+func TestReenrollPrefersTheSuppliedIdentity(t *testing.T) {
+	// Given: a client configured with one identity and handed another for this call.
+	configured := newClientIdentity(t, "configured.example.com")
+	current := newClientIdentity(t, "current.example.com")
+	server := newClientAuthServer(t, newSelfSignedCertificate(t, "current.example.com"))
+
+	client, err := New(Config{
+		Server:            server.url,
+		RootCAs:           server.trust,
+		ClientCertificate: configured,
+	})
+	if err != nil {
+		t.Fatalf("constructing client: %v", err)
+	}
+
+	// When
+	if _, err := client.Reenroll(context.Background(), []byte{0x30, 0x00}, current); err != nil {
+		t.Fatalf("Reenroll returned error: %v", err)
+	}
+
+	// Then
+	if server.presented != "current.example.com" {
+		t.Errorf("server saw client certificate %q, want current.example.com", server.presented)
+	}
+}
+
+// TestReenrollDoesNotReuseAConnectionAcrossIdentities pins why each identity gets its own
+// transport: a pooled connection carries the certificate it was handshaked with, so
+// reusing one would authenticate a renewal as whoever went first.
+func TestReenrollDoesNotReuseAConnectionAcrossIdentities(t *testing.T) {
+	// Given
+	first := newClientIdentity(t, "first.example.com")
+	second := newClientIdentity(t, "second.example.com")
+	server := newClientAuthServer(t, newSelfSignedCertificate(t, "renewed.example.com"))
+
+	client, err := New(Config{Server: server.url, RootCAs: server.trust})
+	if err != nil {
+		t.Fatalf("constructing client: %v", err)
+	}
+
+	// When: two renewals in a row, with different identities.
+	if _, err := client.Reenroll(context.Background(), []byte{0x30, 0x00}, first); err != nil {
+		t.Fatalf("first Reenroll returned error: %v", err)
+	}
+	if server.presented != "first.example.com" {
+		t.Fatalf("server saw client certificate %q on the first call", server.presented)
+	}
+	if _, err := client.Reenroll(context.Background(), []byte{0x30, 0x00}, second); err != nil {
+		t.Fatalf("second Reenroll returned error: %v", err)
+	}
+
+	// Then
+	if server.presented != "second.example.com" {
+		t.Errorf("server saw client certificate %q on the second call, want second.example.com", server.presented)
+	}
+}
+
+// clientAuthServer is an EST endpoint that records the client certificate it was shown. It
+// advertises a CA list matching nothing the client holds, which is what makes Go's default
+// certificate selection send nothing at all.
+type clientAuthServer struct {
+	url       string
+	trust     *x509.CertPool
+	presented string
+}
+
+func newClientAuthServer(t *testing.T, issued *x509.Certificate) *clientAuthServer {
+	t.Helper()
 
 	unrelatedCA := x509.NewCertPool()
 	unrelatedCA.AddCert(newSelfSignedCertificate(t, "Some Other CA"))
 
-	issued := newSelfSignedCertificate(t, "renewing.example.com")
-	var presentedSubject string
-
+	recorder := new(clientAuthServer)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			if len(r.TLS.PeerCertificates) == 0 {
@@ -357,7 +461,7 @@ func TestReenrollPresentsClientCertificateDespiteCAHints(t *testing.T) {
 				_, _ = w.Write([]byte("client certificate must be provided"))
 				return
 			}
-			presentedSubject = r.TLS.PeerCertificates[0].Subject.CommonName
+			recorder.presented = r.TLS.PeerCertificates[0].Subject.CommonName
 			w.Header().Set("Content-Type", mimeTypePKCS7)
 			_, _ = w.Write(encodeCertsOnlyResponse(t, issued))
 		}))
@@ -368,32 +472,8 @@ func TestReenrollPresentsClientCertificateDespiteCAHints(t *testing.T) {
 	server.StartTLS()
 	t.Cleanup(server.Close)
 
-	pool := x509.NewCertPool()
-	pool.AddCert(server.Certificate())
-
-	client, err := New(Config{
-		Server:  server.URL,
-		RootCAs: pool,
-		ClientCertificate: &tls.Certificate{
-			Certificate: [][]byte{clientDER},
-			PrivateKey:  clientKey,
-		},
-	})
-	if err != nil {
-		t.Fatalf("constructing client: %v", err)
-	}
-
-	// When: re-enrolling.
-	certificates, err := client.Reenroll(context.Background(), []byte{0x30, 0x00})
-
-	// Then: the certificate was presented and the renewal succeeded.
-	if err != nil {
-		t.Fatalf("Reenroll returned error: %v", err)
-	}
-	if presentedSubject != "renewing.example.com" {
-		t.Errorf("server saw client certificate %q, want renewing.example.com", presentedSubject)
-	}
-	if len(certificates) != 1 {
-		t.Errorf("expected one certificate, got %d", len(certificates))
-	}
+	recorder.url = server.URL
+	recorder.trust = x509.NewCertPool()
+	recorder.trust.AddCert(server.Certificate())
+	return recorder
 }

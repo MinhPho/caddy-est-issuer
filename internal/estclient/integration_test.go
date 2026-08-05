@@ -98,11 +98,11 @@ func TestGivenLiveESTServerWhenEnrollingThenCertificateIsIssuedAndRenewable(t *t
 		t.Logf("leaf is not signed directly by the first CA cert, which is expected with an intermediate: %v", err)
 	}
 
-	// When: renewing, authenticated by the certificate just issued. EST distinguishes
-	// this from a first enrolment, so it is worth proving the client drives both.
-	// The presented chain must reach a CA the server trusts. /simpleenroll returns only
-	// the leaf here, so the issuing chain from /cacerts is appended, which is what a
-	// deployment must also do when writing the client certificate file.
+	// When: renewing on the same client that just enrolled, authenticated by the
+	// certificate that enrolment returned. That is the real sequence, and it proves the
+	// per-call identity reaches a live server's handshake rather than only a test double.
+	// The presented chain must reach a CA the server trusts, and /simpleenroll returns
+	// only the leaf here, so the issuing chain from /cacerts is appended.
 	chain := make([][]byte, 0, len(issued)+len(caCerts))
 	for _, certificate := range issued {
 		chain = append(chain, certificate.Raw)
@@ -113,20 +113,11 @@ func TestGivenLiveESTServerWhenEnrollingThenCertificateIsIssuedAndRenewable(t *t
 		}
 		chain = append(chain, certificate.Raw)
 	}
-	renewClient, err := New(Config{
-		Server:  labServer(),
-		RootCAs: trust,
-		ClientCertificate: &tls.Certificate{
-			Certificate: chain,
-			PrivateKey:  key,
-			Leaf:        leaf,
-		},
+	renewed, err := client.Reenroll(ctx, csr.Raw, &tls.Certificate{
+		Certificate: chain,
+		PrivateKey:  key,
+		Leaf:        leaf,
 	})
-	if err != nil {
-		t.Fatalf("constructing reenroll client: %v", err)
-	}
-
-	renewed, err := renewClient.Reenroll(ctx, csr.Raw)
 
 	// Then: a second certificate is issued for the same name.
 	if err != nil {
@@ -169,7 +160,7 @@ func TestGivenLiveESTServerWhenReenrollingWithoutClientCertificateThenServerRefu
 	csr, _ := newCSR(t, "caddy-est-unauthenticated.example.com")
 
 	// When: asking to renew anyway.
-	_, err = client.Reenroll(ctx, csr.Raw)
+	_, err = client.Reenroll(ctx, csr.Raw, nil)
 
 	// Then: the server refuses, and the client surfaces it rather than panicking.
 	if err == nil {

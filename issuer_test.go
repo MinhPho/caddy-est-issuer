@@ -6,13 +6,13 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/certmagic"
 	"go.uber.org/zap"
 )
 
@@ -201,72 +201,80 @@ func TestBuildClientConfig(t *testing.T) {
 	})
 }
 
-// TestSubjectKeyIsOrderIndependent guards the renewal decision: a CSR listing the same
-// names in a different order is the same certificate, and must not be re-enrolled as if
-// it were new.
-func TestSubjectKeyIsOrderIndependent(t *testing.T) {
-	// Given
-	first := &x509.CertificateRequest{
-		Subject:     pkix.Name{CommonName: "www.example.com"},
-		DNSNames:    []string{"www.example.com", "example.com"},
-		IPAddresses: []net.IP{net.ParseIP("192.0.2.1")},
-	}
-	second := &x509.CertificateRequest{
-		Subject:     pkix.Name{CommonName: "www.example.com"},
-		DNSNames:    []string{"example.com", "www.example.com"},
-		IPAddresses: []net.IP{net.ParseIP("192.0.2.1")},
-	}
-	different := &x509.CertificateRequest{
-		Subject:  pkix.Name{CommonName: "www.example.com"},
-		DNSNames: []string{"www.example.com"},
-	}
+// TestChooseOperation covers the decision that used to be tracked in memory and so did not
+// survive a restart: whether this issuance is a first enrolment or a renewal.
+func TestChooseOperation(t *testing.T) {
+	csr := newTestCSR("www.example.com", "www.example.com")
 
-	// When / Then
-	if subjectKey(first) != subjectKey(second) {
-		t.Errorf("reordered SANs produced different keys: %q vs %q", subjectKey(first), subjectKey(second))
-	}
-	if subjectKey(first) == subjectKey(different) {
-		t.Error("a different name set produced the same key")
-	}
-}
-
-func TestShouldReenroll(t *testing.T) {
-	csr := &x509.CertificateRequest{
-		Subject:  pkix.Name{CommonName: "www.example.com"},
-		DNSNames: []string{"www.example.com"},
-	}
-
-	t.Run("given a name never enrolled then it enrolls", func(t *testing.T) {
+	t.Run("given no certificate is held then it enrolls", func(t *testing.T) {
 		// Given
-		issuer := &Issuer{ClientCertificateFile: "client.pem", history: newEnrollmentHistory()}
+		issuer := newStorageIssuer(t)
 
-		// When / Then
-		if issuer.shouldReenroll(csr) {
-			t.Error("a name this process has not enrolled should not be re-enrolled")
+		// When
+		operation, identity := issuer.chooseOperation(context.Background(), csr)
+
+		// Then
+		if operation != operationEnroll {
+			t.Errorf("operation = %q, want %q", operation, operationEnroll)
+		}
+		if identity != nil {
+			t.Error("an identity was chosen for a first enrolment")
 		}
 	})
 
-	t.Run("given a previously enrolled name then it re-enrolls", func(t *testing.T) {
+	t.Run("given the certificate is held then it re-enrolls with it", func(t *testing.T) {
 		// Given
-		issuer := &Issuer{ClientCertificateFile: "client.pem", history: newEnrollmentHistory()}
-		issuer.markEnrolled(csr)
+		issuer := newStorageIssuer(t)
+		seedStorage(t, issuer.storage, issuer.IssuerKey(), storageNamesKey(csr), "www.example.com")
 
-		// When / Then
-		if !issuer.shouldReenroll(csr) {
-			t.Error("a name enrolled earlier in this process should be re-enrolled")
+		// When
+		operation, identity := issuer.chooseOperation(context.Background(), csr)
+
+		// Then
+		if operation != operationReenroll {
+			t.Errorf("operation = %q, want %q", operation, operationReenroll)
+		}
+		if identity == nil {
+			t.Fatal("re-enrolment was chosen with no certificate to authenticate it")
+		}
+		if identity.Leaf.Subject.CommonName != "www.example.com" {
+			t.Errorf("identity = %q, want the certificate being replaced", identity.Leaf.Subject.CommonName)
 		}
 	})
 
-	// Without a client certificate there is nothing to authenticate a re-enrolment with,
-	// so enrolling again is the only option that can succeed.
-	t.Run("given no client certificate then it never re-enrolls", func(t *testing.T) {
+	t.Run("given a different name set is held then it enrolls", func(t *testing.T) {
 		// Given
-		issuer := &Issuer{history: newEnrollmentHistory()}
-		issuer.markEnrolled(csr)
+		issuer := newStorageIssuer(t)
+		other := newTestCSR("other.example.com", "other.example.com")
+		seedStorage(t, issuer.storage, issuer.IssuerKey(), storageNamesKey(other), "other.example.com")
 
-		// When / Then
-		if issuer.shouldReenroll(csr) {
-			t.Error("re-enrolment was chosen with no client certificate to authenticate it")
+		// When
+		operation, _ := issuer.chooseOperation(context.Background(), csr)
+
+		// Then
+		if operation != operationEnroll {
+			t.Errorf("operation = %q, want %q", operation, operationEnroll)
+		}
+	})
+
+	// Losing the certificate to a storage failure must not leave Caddy with none at all.
+	t.Run("given the stored certificate is unreadable then it enrolls", func(t *testing.T) {
+		// Given
+		issuer := newStorageIssuer(t)
+		key := certmagic.StorageKeys.SiteCert(issuer.IssuerKey(), storageNamesKey(csr))
+		if err := issuer.storage.Store(context.Background(), key, []byte("not a certificate")); err != nil {
+			t.Fatalf("storing certificate: %v", err)
+		}
+
+		// When
+		operation, identity := issuer.chooseOperation(context.Background(), csr)
+
+		// Then
+		if operation != operationEnroll {
+			t.Errorf("operation = %q, want %q", operation, operationEnroll)
+		}
+		if identity != nil {
+			t.Error("an unreadable certificate was offered as an identity")
 		}
 	})
 }
@@ -379,7 +387,7 @@ func TestEnroll(t *testing.T) {
 
 func TestIssueRejectsAMissingRequest(t *testing.T) {
 	// Given
-	issuer := &Issuer{logger: zap.NewNop(), history: newEnrollmentHistory()}
+	issuer := &Issuer{logger: zap.NewNop()}
 
 	// When
 	_, err := issuer.Issue(context.Background(), nil)
