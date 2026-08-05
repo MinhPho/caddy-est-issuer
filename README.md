@@ -9,16 +9,13 @@ Caddy is the EST *client* here. The certificate authority is any external RFC 70
 ## Why
 
 Caddy's automatic HTTPS assumes ACME, which assumes the CA can reach your server to
-validate a challenge. Inside an enterprise or factory network that assumption usually
-fails: inbound traffic to the host is not whitelisted, so HTTP-01 and TLS-ALPN-01 cannot
-complete, and DNS-01 requires handing a DNS credential to every host.
+validate a challenge. Inside an enterprise network that assumption usually fails: inbound
+traffic to the host is not whitelisted, so HTTP-01 and TLS-ALPN-01 cannot complete, and
+DNS-01 requires handing a DNS credential to every host.
 
 EST inverts the direction. Enrolment is client-initiated and outbound only, and the client
 authenticates with credentials it already holds - HTTP Basic for the first enrolment, then
 the certificate itself for every renewal. Nothing has to reach in.
-
-> This is the opposite direction from [hslatman/caddy-est](https://github.com/hslatman/caddy-est),
-> which makes Caddy serve the EST protocol to other clients.
 
 ## Status
 
@@ -39,6 +36,23 @@ Confirm the module is present:
 ```sh
 ./caddy list-modules | grep tls.issuance.est
 ```
+
+## Compatibility
+
+Tracks the Caddy v2 line, and is built and tested against the version pinned as
+`CADDY_VERSION` in the Makefile.
+
+A Caddy module is compiled into the binary, so the Caddy version that matters is the one you
+build with, not the one this repository pins. Name it explicitly to keep a build
+reproducible:
+
+```sh
+xcaddy build v2.11.4 --with github.com/MinhPho/caddy-est-issuer
+```
+
+The only interfaces this module implements are `certmagic.Issuer` and Caddy's module,
+provisioner and validator interfaces, all stable across v2, so a new Caddy release normally
+needs no change here. The Go toolchain is the one pinned in `go.mod`.
 
 ## Configure
 
