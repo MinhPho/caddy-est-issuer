@@ -1,0 +1,72 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint, build, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Everything CI does is a make target, so the same gate runs locally.
+      - run: make check
+
+      - run: make vuln
+
+  integration:
+    name: Integration tests against a live EST server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The lab CA is a Go binary rather than a production CA, so the enrolment
+      # path is exercised on every pull request instead of only where a CA is
+      # reachable.
+      - name: Run the integration suite
+        run: |
+          make lab &
+          lab=$!
+          trap 'kill $lab' EXIT
+          for _ in $(seq 1 60); do
+            if (echo > /dev/tcp/127.0.0.1/8443) >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          make test-integration
+
+  caddy:
+    name: Module registers in a real Caddy binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: make caddy-verify
