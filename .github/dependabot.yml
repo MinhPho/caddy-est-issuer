@@ -1,0 +1,20 @@
+version: 2
+
+updates:
+  # Grouped into one pull request: this module's dependency tree is almost entirely Caddy's,
+  # so ungrouped updates arrive as a dozen simultaneous transitive bumps.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
