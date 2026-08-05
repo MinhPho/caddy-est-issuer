@@ -143,6 +143,21 @@ To run them against a real EST server instead:
 EST_LAB_SERVER=https://pki.example.com:8443 make test-integration
 ```
 
+### Releasing
+
+Move the `Unreleased` entries in [CHANGELOG.md](CHANGELOG.md) into a dated section, then
+rehearse the release before tagging, since a tag cannot be moved once the Go module proxy
+has served it:
+
+```sh
+make release-check VERSION=0.1.0
+make release-notes VERSION=0.1.0
+```
+
+Pushing the matching `v0.1.0` tag runs the same checks and creates the GitHub release. No
+binaries are attached: the module proxy serves the source, and Caddy binaries are built by
+whoever links the module in.
+
 ## Licence
 
 Apache License 2.0. See [LICENSE](LICENSE).

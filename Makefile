@@ -23,8 +23,10 @@ TOOLS_DIR := .tools
 REVISION := $(shell git rev-parse --short HEAD 2>/dev/null || echo unversioned)
 RELEASE_NAME := caddy-$(CADDY_VERSION)-est-$(REVISION)-$(RELEASE_OS)-$(RELEASE_ARCH)
 
+CHANGELOG := CHANGELOG.md
+
 .PHONY: help tidy fmt fmt-check vet lint test test-integration cover build vuln \
-	check caddy caddy-verify caddy-release lab clean
+	check caddy caddy-verify caddy-release lab clean release-check release-notes
 
 help:  ## List the available targets
 	@grep -hE '^[a-z][a-zA-Z0-9_-]*:.*## ' $(MAKEFILE_LIST) \
@@ -99,6 +101,24 @@ caddy-release: $(TOOLS_DIR)/xcaddy  ## Cross-compile a Caddy binary into dist/ w
 
 lab:  ## Run the lab EST server in the foreground on https://127.0.0.1:8443
 	GOTOOLCHAIN=auto $(GO) run $(EST_SERVER_PKG)
+
+# The release workflow runs these two, so a release can be rehearsed locally before a tag
+# exists. A tag is the only thing that publishes a Go module, and it cannot be moved once
+# the proxy has served it, so the checks belong before tagging rather than after.
+release-check:  ## Verify the changelog documents a release (make release-check VERSION=0.1.0)
+	@test -n "$(VERSION)" || { echo "VERSION is required, e.g. make release-check VERSION=0.1.0"; exit 1; }
+	@grep -qE '^## \[$(VERSION)\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$$' $(CHANGELOG) || { \
+		echo "$(CHANGELOG) has no dated section for $(VERSION); move the Unreleased entries into one"; \
+		exit 1; \
+	}
+	@test -n "$$($(MAKE) --no-print-directory release-notes VERSION=$(VERSION))" || { \
+		echo "the $(VERSION) section of $(CHANGELOG) is empty"; exit 1; \
+	}
+	@echo "$(CHANGELOG) documents $(VERSION)"
+
+release-notes:  ## Print the changelog section for VERSION, for use as release notes
+	@test -n "$(VERSION)" || { echo "VERSION is required"; exit 1; }
+	@awk '/^## \[$(VERSION)\]/{flag=1; next} /^## \[/{flag=0} flag' $(CHANGELOG)
 
 clean:  ## Remove build output
 	rm -rf $(DIST_DIR) $(TOOLS_DIR) caddy coverage.out
