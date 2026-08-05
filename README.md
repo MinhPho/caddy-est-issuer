@@ -50,9 +50,10 @@ reproducible:
 xcaddy build v2.11.4 --with github.com/MinhPho/caddy-est-issuer
 ```
 
-The only interfaces this module implements are `certmagic.Issuer` and Caddy's module,
-provisioner and validator interfaces, all stable across v2, so a new Caddy release normally
-needs no change here. The Go toolchain is the one pinned in `go.mod`.
+The only interfaces this module implements are `certmagic.Issuer`, `caddytls.ConfigSetter`
+and Caddy's module, provisioner and validator interfaces, all stable across v2, so a new
+Caddy release normally needs no change here. The Go toolchain is the one pinned in
+`go.mod`.
 
 ## Configure
 
@@ -81,7 +82,7 @@ www.example.com {
 | `label` | EST label, appended to the well-known path. Some CAs call this the EST alias. |
 | `username`, `password` | HTTP Basic credentials for `/simpleenroll`. |
 | `trusted_ca_file` | PEM bundle used to verify the EST server's own TLS certificate. Defaults to the system trust store. |
-| `client_certificate_file`, `client_key_file` | Client certificate presented to `/simplereenroll`. Must be set together. |
+| `client_certificate_file`, `client_key_file` | Client certificate presented when the request has none of its own, which is every request but a renewal. Must be set together. |
 | `insecure_skip_verify` | Disables verification of the EST server's TLS certificate. Lab bootstrapping only. |
 
 Keep the password out of the config file: `{env.EST_PASSWORD}` reads it from the
@@ -105,9 +106,14 @@ The module ID is `tls.issuance.est` and the field names match the table above:
 
 CertMagic has no separate renewal entry point - it calls `Issue` for the first issuance and
 for every renewal alike. EST does distinguish the two, and a CA may authorise them
-differently, so this issuer tracks which SAN sets it has already enrolled and sends those
-to `/simplereenroll`. Re-enrolment authenticates with the client certificate, so it is only
-attempted when one is configured.
+differently, so the certificate CertMagic already holds decides which call this is: names
+it has a certificate for go to `/simplereenroll`, everything else to `/simpleenroll`.
+
+A re-enrolment authenticates with the certificate it is replacing, read from CertMagic's
+storage along with its key, which is what RFC 7030 section 4.2.2 expects. Nothing needs to
+be configured for this, and the decision survives a restart because it is not held in
+memory. If storage cannot be read, the issuance falls back to `/simpleenroll` rather than
+failing.
 
 An EST server may answer `/simpleenroll` with the leaf certificate alone. A TLS server that
 presents only a leaf gives clients no path to a trusted root, so the missing issuers are
@@ -116,13 +122,11 @@ what is served.
 
 ## Limitations
 
-- **Enrolment tracking is per process.** The first issuance after a Caddy restart goes to
-  `/simpleenroll` even for a name Caddy already holds a certificate for. Servers that
-  reject a duplicate enrolment will refuse it.
-- **The re-enrolment certificate is a configured file**, not the certificate CertMagic
-  currently holds. Rotating it is the deployment's job today.
 - `/serverkeygen` and `/csrattrs` are not implemented. A TLS server generates and keeps its
   own private key, and the CSR is built by CertMagic.
+- **A certificate issued outside Caddy cannot seed a renewal.** The first issuance for a
+  name is always an enrolment, because the renewal identity comes from CertMagic's own
+  storage.
 
 ## Development
 

@@ -14,10 +14,13 @@ between minor versions. Any such change is listed under Changed with the migrati
 
 - EST certificate issuer registered as the Caddy module `tls.issuance.est`, configurable
   from a Caddyfile block or from JSON.
-- Enrolment over `/simpleenroll` and renewal over `/simplereenroll`, chosen automatically:
-  a name set this process has already enrolled is renewed rather than re-enrolled.
-- HTTP Basic authentication for enrolment and client-certificate authentication for
-  renewal, with the password readable from a Caddy placeholder such as `{env.EST_PASSWORD}`.
+- Enrolment over `/simpleenroll` and renewal over `/simplereenroll`, chosen from the
+  certificate CertMagic holds, so the choice is correct across a restart.
+- Renewal authenticated by the certificate being replaced, read from CertMagic's storage
+  along with its key, so nothing has to be configured or rotated for renewal to work.
+- HTTP Basic authentication for enrolment, with the password readable from a Caddy
+  placeholder such as `{env.EST_PASSWORD}`, and an optional client certificate for CAs that
+  authenticate enrolment with TLS.
 - Chain completion from `/cacerts` when the server returns only the leaf, with the
   self-signed root dropped from what is presented to clients.
 - A configurable trust anchor for the EST server's own TLS certificate, and an
