@@ -23,29 +23,32 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/MinhPho/caddy-est-issuer/internal/estclient"
+	"github.com/MinhPho/caddy-est-issuer/internal/estlab"
 )
 
-const defaultLabServer = "https://127.0.0.1:8443"
+var lab = estlab.ReadConfigFromEnv()
 
-func labServer() string {
-	if server := os.Getenv("EST_LAB_SERVER"); server != "" {
-		return server
-	}
-	return defaultLabServer
-}
-
-// writeLabTrustFile learns the lab CA the way an operator does before the first enrolment:
-// over an unauthenticated /cacerts, verified out of band.
-func writeLabTrustFile(t *testing.T) string {
+// labTrustFile is the anchor the issuer verifies the EST server with: the pinned bundle
+// when one is configured, otherwise the lab CA learned the way an operator does before the
+// first enrolment, over an unauthenticated /cacerts and verified out of band.
+func labTrustFile(t *testing.T) string {
 	t.Helper()
 
-	bootstrap, err := estclient.New(estclient.Config{Server: labServer(), InsecureSkipVerify: true})
+	if lab.TrustedCAFile != "" {
+		return lab.TrustedCAFile
+	}
+
+	bootstrap, err := estclient.New(estclient.Config{
+		Server:             lab.Server,
+		Label:              lab.Label,
+		InsecureSkipVerify: true,
+	})
 	if err != nil {
 		t.Fatalf("constructing bootstrap client: %v", err)
 	}
 	caCerts, err := bootstrap.CACerts(context.Background())
 	if err != nil {
-		t.Fatalf("CACerts against %s failed: %v", labServer(), err)
+		t.Fatalf("CACerts against %s failed: %v", lab.Server, err)
 	}
 
 	var bundle []byte
@@ -68,8 +71,11 @@ func newLabIssuer(t *testing.T, storage certmagic.Storage) *Issuer {
 	t.Helper()
 
 	issuer := &Issuer{
-		Server:        labServer(),
-		TrustedCAFile: writeLabTrustFile(t),
+		Server:        lab.Server,
+		Label:         lab.Label,
+		Username:      lab.Username,
+		Password:      lab.Password,
+		TrustedCAFile: labTrustFile(t),
 		logger:        zap.NewNop(),
 		storage:       storage,
 		caChain:       new(caChainCache),
@@ -152,7 +158,7 @@ func TestGivenAStoredCertificateWhenIssuingThenTheLiveServerAcceptsTheRenewal(t 
 
 	// Given: a first enrolment, filed where CertMagic would file it.
 	enrolling := newLabIssuer(t, storage)
-	csr, keyPEM := newLabCSR(t, "caddy-est-issuer-renewal.example.com")
+	csr, keyPEM := newLabCSR(t, lab.NameFor("caddy-est-issuer-renewal"))
 
 	issued, err := enrolling.Issue(ctx, csr)
 	if err != nil {
@@ -189,7 +195,7 @@ func TestGivenEmptyStorageWhenIssuingThenTheLiveServerEnrolls(t *testing.T) {
 
 	// Given
 	issuer := newLabIssuer(t, &certmagic.FileStorage{Path: t.TempDir()})
-	csr, _ := newLabCSR(t, "caddy-est-issuer-bootstrap.example.com")
+	csr, _ := newLabCSR(t, lab.NameFor("caddy-est-issuer-bootstrap"))
 
 	// When
 	operation, identity := issuer.chooseOperation(ctx, csr)
@@ -202,7 +208,7 @@ func TestGivenEmptyStorageWhenIssuingThenTheLiveServerEnrolls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Issue failed: %v", err)
 	}
-	if got := leafOf(t, issued.Certificate).Subject.CommonName; got != "caddy-est-issuer-bootstrap.example.com" {
-		t.Errorf("leaf CN = %q, want the requested name", got)
+	if got := leafOf(t, issued.Certificate).Subject.CommonName; got != csr.Subject.CommonName {
+		t.Errorf("leaf CN = %q, want %q", got, csr.Subject.CommonName)
 	}
 }

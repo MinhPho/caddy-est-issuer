@@ -17,15 +17,78 @@ import (
 	"crypto/x509/pkix"
 	"os"
 	"testing"
+
+	"github.com/MinhPho/caddy-est-issuer/internal/estlab"
 )
 
-const defaultLabServer = "https://127.0.0.1:8443"
+var lab = estlab.ReadConfigFromEnv()
 
-func labServer() string {
-	if server := os.Getenv("EST_LAB_SERVER"); server != "" {
-		return server
+// labCACerts learns the CA chain the way an unprovisioned client must. With no anchor
+// configured this is the one exchange RFC 7030 allows to be unauthenticated, which the
+// operator is expected to verify out of band; against a real CA, pin EST_LAB_CA_FILE and
+// the same fetch is verified.
+func labCACerts(ctx context.Context, t *testing.T) []*x509.Certificate {
+	t.Helper()
+
+	cfg := Config{Server: lab.Server, Label: lab.Label}
+	if lab.TrustedCAFile == "" {
+		cfg.InsecureSkipVerify = true
+	} else {
+		cfg.RootCAs = labTrustFromFile(t)
 	}
-	return defaultLabServer
+
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("constructing bootstrap client: %v", err)
+	}
+	caCerts, err := client.CACerts(ctx)
+	if err != nil {
+		t.Fatalf("CACerts against %s failed: %v", lab.Server, err)
+	}
+	if len(caCerts) == 0 {
+		t.Fatal("CACerts returned no certificates")
+	}
+	return caCerts
+}
+
+func labTrustFromFile(t *testing.T) *x509.CertPool {
+	t.Helper()
+
+	pem, err := os.ReadFile(lab.TrustedCAFile)
+	if err != nil {
+		t.Fatalf("reading EST_LAB_CA_FILE: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		t.Fatalf("EST_LAB_CA_FILE %s held no certificates", lab.TrustedCAFile)
+	}
+	return pool
+}
+
+// labClient builds the client under test, carrying whatever authentication the configured
+// server needs. The lab needs none; a real CA generally wants a label and Basic credentials.
+func labClient(t *testing.T, trust *x509.CertPool) *Client {
+	t.Helper()
+
+	client, err := New(Config{
+		Server:   lab.Server,
+		Label:    lab.Label,
+		Username: lab.Username,
+		Password: lab.Password,
+		RootCAs:  trust,
+	})
+	if err != nil {
+		t.Fatalf("constructing verified client: %v", err)
+	}
+	return client
+}
+
+func labTrustPool(caCerts []*x509.Certificate) *x509.CertPool {
+	pool := x509.NewCertPool()
+	for _, certificate := range caCerts {
+		pool.AddCert(certificate)
+	}
+	return pool
 }
 
 func newCSR(t *testing.T, commonName string) (*x509.CertificateRequest, *ecdsa.PrivateKey) {
@@ -55,31 +118,13 @@ func newCSR(t *testing.T, commonName string) (*x509.CertificateRequest, *ecdsa.P
 func TestGivenLiveESTServerWhenEnrollingThenCertificateIsIssuedAndRenewable(t *testing.T) {
 	ctx := context.Background()
 
-	// Given: the CA chain fetched without a trust anchor, which is the only step RFC 7030
-	// allows to be unauthenticated, and which the operator is expected to verify manually.
-	bootstrap, err := New(Config{Server: labServer(), InsecureSkipVerify: true})
-	if err != nil {
-		t.Fatalf("constructing bootstrap client: %v", err)
-	}
-	caCerts, err := bootstrap.CACerts(ctx)
-	if err != nil {
-		t.Fatalf("CACerts against %s failed: %v", labServer(), err)
-	}
-	if len(caCerts) == 0 {
-		t.Fatal("CACerts returned no certificates")
-	}
-
-	trust := x509.NewCertPool()
-	for _, certificate := range caCerts {
-		trust.AddCert(certificate)
-	}
+	// Given: the CA chain, learned before anything trusts the server.
+	caCerts := labCACerts(ctx, t)
 
 	// When: enrolling a fresh key, now verifying the server against that chain.
-	client, err := New(Config{Server: labServer(), RootCAs: trust})
-	if err != nil {
-		t.Fatalf("constructing verified client: %v", err)
-	}
-	csr, key := newCSR(t, "caddy-est-integration.example.com")
+	client := labClient(t, labTrustPool(caCerts))
+	commonName := lab.NameFor("caddy-est-integration")
+	csr, key := newCSR(t, commonName)
 
 	issued, err := client.Enroll(ctx, csr.Raw)
 	if err != nil {
@@ -91,8 +136,8 @@ func TestGivenLiveESTServerWhenEnrollingThenCertificateIsIssuedAndRenewable(t *t
 		t.Fatal("Enroll returned no certificates")
 	}
 	leaf := issued[0]
-	if leaf.Subject.CommonName != "caddy-est-integration.example.com" {
-		t.Errorf("leaf CN = %q, want the requested name", leaf.Subject.CommonName)
+	if leaf.Subject.CommonName != commonName {
+		t.Errorf("leaf CN = %q, want %q", leaf.Subject.CommonName, commonName)
 	}
 	if err := leaf.CheckSignatureFrom(caCerts[0]); err != nil {
 		t.Logf("leaf is not signed directly by the first CA cert, which is expected with an intermediate: %v", err)
@@ -141,26 +186,11 @@ func TestGivenLiveESTServerWhenReenrollingWithoutClientCertificateThenServerRefu
 	ctx := context.Background()
 
 	// Given: a client that verifies the server but presents no certificate of its own.
-	bootstrap, err := New(Config{Server: labServer(), InsecureSkipVerify: true})
-	if err != nil {
-		t.Fatalf("constructing bootstrap client: %v", err)
-	}
-	caCerts, err := bootstrap.CACerts(ctx)
-	if err != nil {
-		t.Fatalf("CACerts against %s failed: %v", labServer(), err)
-	}
-	trust := x509.NewCertPool()
-	for _, certificate := range caCerts {
-		trust.AddCert(certificate)
-	}
-	client, err := New(Config{Server: labServer(), RootCAs: trust})
-	if err != nil {
-		t.Fatalf("constructing client: %v", err)
-	}
-	csr, _ := newCSR(t, "caddy-est-unauthenticated.example.com")
+	client := labClient(t, labTrustPool(labCACerts(ctx, t)))
+	csr, _ := newCSR(t, lab.NameFor("caddy-est-unauthenticated"))
 
 	// When: asking to renew anyway.
-	_, err = client.Reenroll(ctx, csr.Raw, nil)
+	_, err := client.Reenroll(ctx, csr.Raw, nil)
 
 	// Then: the server refuses, and the client surfaces it rather than panicking.
 	if err == nil {
