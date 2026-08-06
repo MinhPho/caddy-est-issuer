@@ -132,18 +132,20 @@ what is served.
 
 ```sh
 make                  # list targets
+make hooks            # install the git hooks that gate a commit and a push
 make check            # the fast gate - lint, build, unit tests
-make vuln             # check dependencies against the Go vulnerability database
-make test-race        # unit tests under the race detector
-make build-all        # compile for every platform the download page offers
+make push-check       # everything CI runs, before the push leaves the machine
 make lab              # a local EST server on https://127.0.0.1:8443
 make test-integration
 make caddy-verify     # build a Caddy binary and assert the module registered
 ```
 
-CI runs all of the above on every pull request. `test-race` and `build-all` mirror what
-Caddy's package registry rebuilds a listed plugin with, so a portability break surfaces
-here rather than as the plugin dropping off the download page.
+`push-check` is what the `pre-push` hook runs, and CI runs the same targets on every pull
+request. Two of them, `test-race` and `build-all`, mirror what Caddy's package registry
+rebuilds a listed plugin with, so a portability break surfaces here rather than as the
+plugin dropping off the download page.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the commit convention and the release process.
 
 The lab is a reference EST server with a transient CA, so a clean checkout can run the
 integration tests without a licence or a credential. See [lab/README.md](lab/README.md).
