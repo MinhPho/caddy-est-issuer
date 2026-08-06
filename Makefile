@@ -25,8 +25,15 @@ RELEASE_NAME := caddy-$(CADDY_VERSION)-est-$(REVISION)-$(RELEASE_OS)-$(RELEASE_A
 
 CHANGELOG := CHANGELOG.md
 
-.PHONY: help tidy fmt fmt-check vet lint test test-integration cover build vuln \
-	check caddy caddy-verify caddy-release lab clean release-check release-notes
+# Caddy's package registry rebuilds a listed plugin for every platform its download
+# page offers, and a plugin that fails to build there stops being downloadable. The
+# 32-bit entry earns its place: it is the one that catches an assumption about word
+# size.
+PLATFORMS := linux/amd64 linux/arm64 linux/arm darwin/arm64 windows/amd64 freebsd/amd64
+
+.PHONY: help tidy fmt fmt-check vet lint test test-race test-integration cover build \
+	build-all vuln check caddy caddy-verify caddy-release lab clean release-check \
+	release-notes
 
 help:  ## List the available targets
 	@grep -hE '^[a-z][a-zA-Z0-9_-]*:.*## ' $(MAKEFILE_LIST) \
@@ -55,6 +62,11 @@ lint: fmt-check vet  ## Static checks - formatting and go vet
 test:  ## Run the unit test suite
 	$(GO) test ./...
 
+# Kept out of check so the inner loop stays fast: the race detector rebuilds the
+# world with instrumentation and costs several times a plain test run.
+test-race:  ## Run the unit test suite under the race detector
+	$(GO) test -race -count=1 ./...
+
 test-integration:  ## Run the end-to-end tests against a live EST server (needs make lab)
 	$(GO) test -tags=integration -count=1 ./...
 
@@ -65,13 +77,19 @@ cover:  ## Run tests and report coverage per package
 build:  ## Compile the module
 	$(GO) build ./...
 
+build-all:  ## Compile the module for every platform the download page offers
+	@for platform in $(PLATFORMS); do \
+		echo "building $$platform"; \
+		GOOS=$${platform%/*} GOARCH=$${platform#*/} $(GO) build ./... || exit 1; \
+	done
+
 # govulncheck type-checks with the standard library of the toolchain that built
 # it, and `go run pkg@version` builds in the tool's own module context, so it
 # would otherwise be built by whatever Go happens to be on PATH.
 vuln:  ## Check dependencies against the Go vulnerability database
 	GOTOOLCHAIN=$(GO_TOOLCHAIN) $(GO) run $(GOVULNCHECK_PKG) ./...
 
-check: lint build test  ## Everything CI runs, in CI's order
+check: lint build test  ## The fast gate - lint, build and unit tests
 
 caddy:  ## Build a Caddy binary for this machine with the module linked in
 	$(GO) run $(XCADDY_PKG) build $(CADDY_VERSION) --with $(MODULE)=.

@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   check:
-    name: Lint, build, unit tests
+    name: Lint, build, tests, portability
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -26,6 +26,13 @@ jobs:
       - run: make check
 
       - run: make vuln
+
+      # Caddy's package registry runs its own race and cross-platform build over every
+      # listed plugin, so a break here would first show up as the plugin disappearing
+      # from the download page. Cheaper to find it on the pull request.
+      - run: make test-race
+
+      - run: make build-all
 
   integration:
     name: Integration tests against a live EST server

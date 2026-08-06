@@ -57,6 +57,12 @@ jobs:
 
       - run: make vuln
 
+      - run: make test-race
+
+      # A release is what the package registry redeploys, and it rejects a version that
+      # will not build for every platform it offers.
+      - run: make build-all
+
       - run: make caddy-verify
 
       - name: Verify the changelog documents this version
