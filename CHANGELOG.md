@@ -10,6 +10,8 @@ between minor versions. Any such change is listed under Changed with the migrati
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-06
+
 ### Added
 
 - EST certificate issuer registered as the Caddy module `tls.issuance.est`, configurable
