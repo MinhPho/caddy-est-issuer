@@ -31,14 +31,17 @@ CHANGELOG := CHANGELOG.md
 # size.
 PLATFORMS := linux/amd64 linux/arm64 linux/arm darwin/arm64 windows/amd64 freebsd/amd64
 
-.PHONY: help tidy fmt fmt-check vet lint test test-race test-integration cover build \
-	build-all vuln check caddy caddy-verify caddy-release lab clean release-check \
-	release-notes
+.PHONY: help hooks tidy fmt fmt-check vet lint test test-race test-integration cover \
+	build build-all vuln check push-check caddy caddy-verify caddy-release lab clean \
+	release-check release-notes
 
 help:  ## List the available targets
 	@grep -hE '^[a-z][a-zA-Z0-9_-]*:.*## ' $(MAKEFILE_LIST) \
 		| sort \
 		| awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
+
+hooks:  ## Install the git hooks that gate a commit, a message and a push
+	prek install -t pre-commit -t commit-msg -t pre-push --prepare-hooks
 
 tidy:  ## Sync go.mod and go.sum
 	$(GO) mod tidy
@@ -90,6 +93,10 @@ vuln:  ## Check dependencies against the Go vulnerability database
 	GOTOOLCHAIN=$(GO_TOOLCHAIN) $(GO) run $(GOVULNCHECK_PKG) ./...
 
 check: lint build test  ## The fast gate - lint, build and unit tests
+
+# What the pre-push hook runs. CI runs these four as separate steps so a failure
+# names itself in the Actions UI; a push is atomic, so here they are one target.
+push-check: check vuln test-race build-all  ## Everything CI runs, before the push leaves the machine
 
 caddy:  ## Build a Caddy binary for this machine with the module linked in
 	$(GO) run $(XCADDY_PKG) build $(CADDY_VERSION) --with $(MODULE)=.
