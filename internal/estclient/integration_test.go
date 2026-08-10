@@ -83,7 +83,16 @@ func labClient(t *testing.T, trust *x509.CertPool) *Client {
 	return client
 }
 
-func labTrustPool(caCerts []*x509.Certificate) *x509.CertPool {
+// labTrust picks the anchor the client under test verifies the server with: the pinned
+// bundle when one is configured, otherwise the chain just learned from /cacerts. On the
+// lab the two coincide because the EST server issues its own TLS certificate; a real CA
+// tends to serve TLS from a separate management PKI that /cacerts never returns.
+func labTrust(t *testing.T, caCerts []*x509.Certificate) *x509.CertPool {
+	t.Helper()
+
+	if lab.TrustedCAFile != "" {
+		return labTrustFromFile(t)
+	}
 	pool := x509.NewCertPool()
 	for _, certificate := range caCerts {
 		pool.AddCert(certificate)
@@ -122,7 +131,7 @@ func TestGivenLiveESTServerWhenEnrollingThenCertificateIsIssuedAndRenewable(t *t
 	caCerts := labCACerts(ctx, t)
 
 	// When: enrolling a fresh key, now verifying the server against that chain.
-	client := labClient(t, labTrustPool(caCerts))
+	client := labClient(t, labTrust(t, caCerts))
 	commonName := lab.NameFor("caddy-est-integration")
 	csr, key := newCSR(t, commonName)
 
@@ -186,7 +195,7 @@ func TestGivenLiveESTServerWhenReenrollingWithoutClientCertificateThenServerRefu
 	ctx := context.Background()
 
 	// Given: a client that verifies the server but presents no certificate of its own.
-	client := labClient(t, labTrustPool(labCACerts(ctx, t)))
+	client := labClient(t, labTrust(t, labCACerts(ctx, t)))
 	csr, _ := newCSR(t, lab.NameFor("caddy-est-unauthenticated"))
 
 	// When: asking to renew anyway.
