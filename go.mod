@@ -2,7 +2,7 @@ module github.com/MinhPho/caddy-est-issuer
 
 go 1.25.1
 
-toolchain go1.25.12
+toolchain go1.25.13
 
 require (
 	github.com/caddyserver/caddy/v2 v2.11.4
