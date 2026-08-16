@@ -37,6 +37,9 @@ const (
 	headerContentTransferEncoding = "Content-Transfer-Encoding"
 	encodingBase64                = "base64"
 
+	// RFC 2045 section 6.8: encoded lines are at most 76 characters.
+	mimeBase64LineLength = 76
+
 	// EST payloads carry certificates, never bulk data. Capping the read keeps a
 	// misbehaving or hostile server from exhausting memory.
 	maxResponseBytes = 1 << 20
@@ -221,9 +224,7 @@ func (c *Client) roundTrip(ctx context.Context, httpClient *http.Client, method,
 func (c *Client) buildRequest(ctx context.Context, method, operation string, csrDER []byte) (*http.Request, error) {
 	var body io.Reader
 	if csrDER != nil {
-		encoded := make([]byte, base64.StdEncoding.EncodedLen(len(csrDER)))
-		base64.StdEncoding.Encode(encoded, csrDER)
-		body = bytes.NewReader(encoded)
+		body = bytes.NewReader(encodeMIMEBase64(csrDER))
 	}
 
 	request, err := http.NewRequestWithContext(ctx, method, c.endpoint(operation), body)
@@ -240,6 +241,24 @@ func (c *Client) buildRequest(ctx context.Context, method, operation string, csr
 		request.SetBasicAuth(c.username, c.password)
 	}
 	return request, nil
+}
+
+// encodeMIMEBase64 renders data as the base64 of RFC 2045, which is what RFC 7030 section
+// 4.2.1 specifies for a request body: lines of at most 76 characters, each ended by CRLF.
+// The line breaks are not decoration - a server built on OpenSSL's base64 BIO, Cisco's
+// libest among them, rejects one unbroken line as a corrupt PKCS#10.
+func encodeMIMEBase64(data []byte) []byte {
+	encoded := base64.StdEncoding.EncodeToString(data)
+
+	var builder bytes.Buffer
+	for len(encoded) > mimeBase64LineLength {
+		builder.WriteString(encoded[:mimeBase64LineLength])
+		builder.WriteString("\r\n")
+		encoded = encoded[mimeBase64LineLength:]
+	}
+	builder.WriteString(encoded)
+	builder.WriteString("\r\n")
+	return builder.Bytes()
 }
 
 // ParseCertsOnlyPKCS7 decodes an EST response body into certificates. The body is a

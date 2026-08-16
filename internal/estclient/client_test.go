@@ -1,6 +1,7 @@
 package estclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -240,7 +241,7 @@ func TestEnrollSendsBase64CSRAndBasicAuth(t *testing.T) {
 	if gotEncoding != encodingBase64 {
 		t.Errorf("Content-Transfer-Encoding = %q, want %q", gotEncoding, encodingBase64)
 	}
-	if want := base64.StdEncoding.EncodeToString(csrDER); gotBody != want {
+	if want := base64.StdEncoding.EncodeToString(csrDER); strings.TrimSpace(gotBody) != want {
 		t.Errorf("body = %q, want %q", gotBody, want)
 	}
 	if gotUser != "robot" || gotPassword != "secret" {
@@ -248,6 +249,45 @@ func TestEnrollSendsBase64CSRAndBasicAuth(t *testing.T) {
 	}
 	if len(certificates) != 1 || certificates[0].Subject.CommonName != "server.example.com" {
 		t.Errorf("unexpected certificates: %+v", certificates)
+	}
+}
+
+// TestEnrollWrapsTheBase64BodyAsMIMELines pins the framing RFC 7030 section 4.2.1 requires:
+// the base64 of RFC 2045, whose lines are at most 76 characters and end in CRLF. Cisco's
+// libest rejects a single unbroken line as a corrupt PKCS#10, and it is the reference the
+// widest range of servers descends from.
+func TestEnrollWrapsTheBase64BodyAsMIMELines(t *testing.T) {
+	issued := newSelfSignedCertificate(t, "server.example.com")
+	csrDER := bytes.Repeat([]byte{0x30, 0x82, 0x01, 0x02}, 100)
+
+	var gotBody string
+	client := newTestClient(t, Config{}, http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			gotBody = string(raw)
+			w.Header().Set("Content-Type", mimeTypePKCS7)
+			_, _ = w.Write(encodeCertsOnlyResponse(t, issued))
+		}))
+
+	if _, err := client.Enroll(context.Background(), csrDER); err != nil {
+		t.Fatalf("Enroll returned error: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSuffix(gotBody, "\r\n"), "\r\n")
+	if len(lines) < 2 {
+		t.Fatalf("body was not split into CRLF lines: %q", gotBody)
+	}
+	for index, line := range lines {
+		if len(line) > 76 || strings.ContainsAny(line, "\r\n") {
+			t.Errorf("line %d is %d characters, want at most 76 with no bare line breaks", index, len(line))
+		}
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.Join(lines, ""))
+	if err != nil {
+		t.Fatalf("body did not decode as base64 once unwrapped: %v", err)
+	}
+	if !bytes.Equal(decoded, csrDER) {
+		t.Error("unwrapped body did not decode to the CSR that was sent")
 	}
 }
 

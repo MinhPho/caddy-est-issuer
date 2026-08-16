@@ -10,6 +10,13 @@ between minor versions. Any such change is listed under Changed with the migrati
 
 ## [Unreleased]
 
+### Fixed
+
+- Request bodies are now sent as RFC 2045 base64, wrapped at 76 characters with CRLF line
+  ends, as RFC 7030 section 4.2.1 specifies. A single unbroken line was accepted by the lab
+  server but rejected as a corrupt PKCS#10 by servers built on OpenSSL's base64 BIO, Cisco's
+  libest among them.
+
 ## [0.1.0] - 2026-08-06
 
 ### Added
