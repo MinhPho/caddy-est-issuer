@@ -21,7 +21,14 @@ RELEASE_ARCH ?= amd64
 DIST_DIR := dist
 TOOLS_DIR := .tools
 REVISION := $(shell git rev-parse --short HEAD 2>/dev/null || echo unversioned)
-RELEASE_PREFIX := caddy-$(CADDY_VERSION)-est-$(REVISION)
+
+# A release is built from the tagged module as the Go proxy serves it, not from the
+# working tree: with the toolchain pinned, anyone with the same proxy view rebuilds
+# the same bytes and can compare them with the published checksums. Left empty, the
+# working tree is built instead, which is what development and a rehearsal want.
+MODULE_VERSION ?=
+MODULE_SPEC := $(if $(MODULE_VERSION),$(MODULE)@$(MODULE_VERSION),$(MODULE)=.)
+RELEASE_PREFIX := caddy-$(CADDY_VERSION)-est-$(or $(MODULE_VERSION),$(REVISION))
 RELEASE_NAME := $(RELEASE_PREFIX)-$(RELEASE_OS)-$(RELEASE_ARCH)
 RELEASE_PLATFORMS := linux/amd64 linux/arm64
 RELEASE_NAMES := $(foreach platform,$(RELEASE_PLATFORMS),$(RELEASE_PREFIX)-$(subst /,-,$(platform)))
@@ -116,10 +123,10 @@ $(TOOLS_DIR)/xcaddy:
 	# build, and go run would cross-compile xcaddy itself with it.
 	GOBIN=$(CURDIR)/$(TOOLS_DIR) $(GO) install $(XCADDY_PKG)
 
-caddy-release: $(TOOLS_DIR)/xcaddy  ## Cross-compile a Caddy binary into dist/ with a checksum
+caddy-release: $(TOOLS_DIR)/xcaddy  ## Cross-compile a Caddy binary into dist/ (MODULE_VERSION=v0.1.0 builds the tagged module)
 	mkdir -p $(DIST_DIR)
 	GOOS=$(RELEASE_OS) GOARCH=$(RELEASE_ARCH) $(TOOLS_DIR)/xcaddy build $(CADDY_VERSION) \
-		--with $(MODULE)=. \
+		--with $(MODULE_SPEC) \
 		--output $(DIST_DIR)/$(RELEASE_NAME)
 	@cd $(DIST_DIR) && { \
 		command -v sha256sum >/dev/null 2>&1 \

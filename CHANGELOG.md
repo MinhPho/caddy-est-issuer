@@ -10,6 +10,14 @@ between minor versions. Any such change is listed under Changed with the migrati
 
 ## [Unreleased]
 
+### Changed
+
+- Release binaries are built from the tagged module as the Go proxy serves it, rather than
+  from the working tree, and are named after the tag instead of the commit. With the pinned
+  toolchain, `make caddy-release MODULE_VERSION=<tag>` reproduces the published bytes from
+  any machine that sees the same module, so a downstream build can be checked against the
+  published checksums and attestation.
+
 ## [0.1.1] - 2026-08-19
 
 ### Added

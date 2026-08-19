@@ -25,6 +25,11 @@ jobs:
       attestations: write
       contents: write
       id-token: write
+    env:
+      # A tag push builds the tagged module as the proxy serves it, so the binaries can
+      # be reproduced from anywhere and named after the tag. A rehearsal has no published
+      # version to build, so it builds the working tree.
+      MODULE_VERSION: ${{ github.event_name == 'push' && github.ref_name || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
