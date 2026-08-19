@@ -22,7 +22,9 @@ jobs:
     name: Publish a release
     runs-on: ubuntu-latest
     permissions:
+      attestations: write
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -71,9 +73,9 @@ jobs:
       - name: Extract the release notes
         run: make release-notes VERSION=${{ steps.version.outputs.version }} | tee release-notes.md
 
-      # No binaries are attached. A Go module is published by its tag alone: the module
-      # proxy serves the source, and a Caddy binary containing this module is built by
-      # whoever links it in, from sources they resolve themselves.
+      - name: Build the Caddy release artifacts
+        run: make caddy-release-all
+
       - name: Create the GitHub release
         if: github.event_name == 'push' && !inputs.dry_run
         env:
@@ -81,9 +83,21 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: gh release create "$TAG" --title "$TAG" --notes-file release-notes.md
 
+      - name: Upload the Caddy release artifacts
+        if: github.event_name == 'push' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: make caddy-release-upload TAG=${{ github.ref_name }}
+
+      - name: Attest the Caddy release artifacts
+        if: github.event_name == 'push' && !inputs.dry_run
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
+
       - name: Report what a rehearsal would have done
         if: github.event_name != 'push' || inputs.dry_run
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          echo "Dry run: validated $VERSION and skipped creating the release."
+          echo "Dry run: built and validated $VERSION; skipped publishing and attestation."

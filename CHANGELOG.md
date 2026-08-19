@@ -10,6 +10,11 @@ between minor versions. Any such change is listed under Changed with the migrati
 
 ## [Unreleased]
 
+### Added
+
+- GitHub releases now include Caddy with `tls.issuance.est` linked in for Linux amd64 and
+  arm64, SHA-256 checksums and GitHub build-provenance attestations.
+
 ### Fixed
 
 - Request bodies are now sent as RFC 2045 base64, wrapped at 76 characters with CRLF line

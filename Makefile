@@ -21,7 +21,11 @@ RELEASE_ARCH ?= amd64
 DIST_DIR := dist
 TOOLS_DIR := .tools
 REVISION := $(shell git rev-parse --short HEAD 2>/dev/null || echo unversioned)
-RELEASE_NAME := caddy-$(CADDY_VERSION)-est-$(REVISION)-$(RELEASE_OS)-$(RELEASE_ARCH)
+RELEASE_PREFIX := caddy-$(CADDY_VERSION)-est-$(REVISION)
+RELEASE_NAME := $(RELEASE_PREFIX)-$(RELEASE_OS)-$(RELEASE_ARCH)
+RELEASE_PLATFORMS := linux/amd64 linux/arm64
+RELEASE_NAMES := $(foreach platform,$(RELEASE_PLATFORMS),$(RELEASE_PREFIX)-$(subst /,-,$(platform)))
+RELEASE_FILES := $(RELEASE_NAMES) $(addsuffix .sha256,$(RELEASE_NAMES)) SHA256SUMS
 
 CHANGELOG := CHANGELOG.md
 
@@ -32,8 +36,8 @@ CHANGELOG := CHANGELOG.md
 PLATFORMS := linux/amd64 linux/arm64 linux/arm darwin/arm64 windows/amd64 freebsd/amd64
 
 .PHONY: help hooks tidy fmt fmt-check vet lint test test-race test-integration cover \
-	build build-all vuln check push-check caddy caddy-verify caddy-release lab clean \
-	release-check release-notes
+	build build-all vuln check push-check caddy caddy-verify caddy-release \
+	caddy-release-all caddy-release-upload lab clean release-check release-notes
 
 help:  ## List the available targets
 	@grep -hE '^[a-z][a-zA-Z0-9_-]*:.*## ' $(MAKEFILE_LIST) \
@@ -123,6 +127,21 @@ caddy-release: $(TOOLS_DIR)/xcaddy  ## Cross-compile a Caddy binary into dist/ w
 			|| shasum -a 256 $(RELEASE_NAME); \
 	} > $(RELEASE_NAME).sha256
 	@cat $(DIST_DIR)/$(RELEASE_NAME).sha256
+
+caddy-release-all: $(TOOLS_DIR)/xcaddy  ## Build both Linux release binaries and their checksums
+	@for platform in $(RELEASE_PLATFORMS); do \
+		$(MAKE) --no-print-directory caddy-release \
+			RELEASE_OS=$${platform%/*} RELEASE_ARCH=$${platform#*/} || exit 1; \
+	done
+	@cd $(DIST_DIR) && cat $(addsuffix .sha256,$(RELEASE_NAMES)) > SHA256SUMS
+	@cat $(DIST_DIR)/SHA256SUMS
+
+caddy-release-upload:  ## Upload built Caddy release files (make caddy-release-upload TAG=v0.1.0)
+	@test -n "$(TAG)" || { echo "TAG is required, e.g. make caddy-release-upload TAG=v0.1.0"; exit 1; }
+	@for file in $(RELEASE_FILES); do \
+		test -f "$(DIST_DIR)/$$file" || { echo "$(DIST_DIR)/$$file does not exist"; exit 1; }; \
+	done
+	gh release upload "$(TAG)" $(addprefix $(DIST_DIR)/,$(RELEASE_FILES))
 
 lab:  ## Run the lab EST server in the foreground on https://127.0.0.1:8443
 	GOTOOLCHAIN=auto $(GO) run $(EST_SERVER_PKG)

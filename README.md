@@ -24,7 +24,29 @@ under [Limitations](#limitations).
 
 ## Install
 
-Caddy modules are compiled in - there is no plugin directory. Build a Caddy binary with
+Caddy modules are compiled in - there is no plugin directory. Each
+[GitHub release](https://github.com/MinhPho/caddy-est-issuer/releases) includes Caddy with
+this module linked in for Linux on amd64 and arm64. The asset name records the Caddy
+version and this module's Git revision.
+
+Download the binary and its checksum with the GitHub CLI. Change `release` and use
+`arm64` instead of `amd64` when appropriate:
+
+```sh
+release=vX.Y.Z
+gh release download "$release" --repo MinhPho/caddy-est-issuer \
+  --pattern 'caddy-v*-est-*-linux-amd64' \
+  --pattern 'caddy-v*-est-*-linux-amd64.sha256'
+sha256sum --check caddy-v*-est-*-linux-amd64.sha256
+gh attestation verify caddy-v*-est-*-linux-amd64 \
+  --repo MinhPho/caddy-est-issuer
+sudo install -m 0755 caddy-v*-est-*-linux-amd64 /usr/local/bin/caddy
+```
+
+The checksum detects a damaged download. The attestation verifies that GitHub Actions
+built that exact file from this repository. Install only after both checks pass.
+
+To build for another platform or choose a different Caddy version, use
 [xcaddy](https://github.com/caddyserver/xcaddy):
 
 ```sh
@@ -166,9 +188,8 @@ make release-check VERSION=0.1.0
 make release-notes VERSION=0.1.0
 ```
 
-Pushing the matching `v0.1.0` tag runs the same checks and creates the GitHub release. No
-binaries are attached: the module proxy serves the source, and Caddy binaries are built by
-whoever links the module in.
+Pushing the matching `v0.1.0` tag runs the same checks and creates the GitHub release with
+Linux amd64 and arm64 Caddy binaries, checksums and build-provenance attestations.
 
 ## Licence
 
