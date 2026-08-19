@@ -10,6 +10,11 @@ between minor versions. Any such change is listed under Changed with the migrati
 
 ## [Unreleased]
 
+### Fixed
+
+- Release builds no longer embed the git state of the surrounding checkout, which made
+  the same module version hash differently depending on where it was built.
+
 ## [0.1.2] - 2026-08-19
 
 ### Changed

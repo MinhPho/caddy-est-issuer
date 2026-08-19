@@ -123,9 +123,13 @@ $(TOOLS_DIR)/xcaddy:
 	# build, and go run would cross-compile xcaddy itself with it.
 	GOBIN=$(CURDIR)/$(TOOLS_DIR) $(GO) install $(XCADDY_PKG)
 
+# xcaddy assembles its build in a folder under this checkout, so go would stamp the
+# binary with whatever git state surrounds it. The module version already says what
+# was built, and the stamp would make the same version hash differently per machine.
 caddy-release: $(TOOLS_DIR)/xcaddy  ## Cross-compile a Caddy binary into dist/ (MODULE_VERSION=v0.1.0 builds the tagged module)
 	mkdir -p $(DIST_DIR)
-	GOOS=$(RELEASE_OS) GOARCH=$(RELEASE_ARCH) $(TOOLS_DIR)/xcaddy build $(CADDY_VERSION) \
+	GOOS=$(RELEASE_OS) GOARCH=$(RELEASE_ARCH) GOFLAGS=-buildvcs=false \
+		$(TOOLS_DIR)/xcaddy build $(CADDY_VERSION) \
 		--with $(MODULE_SPEC) \
 		--output $(DIST_DIR)/$(RELEASE_NAME)
 	@cd $(DIST_DIR) && { \
