@@ -10,6 +10,8 @@ between minor versions. Any such change is listed under Changed with the migrati
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-19
+
 ### Added
 
 - GitHub releases now include Caddy with `tls.issuance.est` linked in for Linux amd64 and
