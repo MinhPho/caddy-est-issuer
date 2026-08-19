@@ -10,6 +10,8 @@ between minor versions. Any such change is listed under Changed with the migrati
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-19
+
 ### Changed
 
 - Release binaries are built from the tagged module as the Go proxy serves it, rather than
